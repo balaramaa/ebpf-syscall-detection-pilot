@@ -1,0 +1,59 @@
+#!/usr/bin/env bpftrace
+/*
+ * sched_latency.bt
+ *
+ * Purpose: Measure real CPU scheduling latency (time a task spends
+ * runnable but waiting for the CPU) per process. This is the
+ * "CPU Scheduling Latency" metric described in Section 5.2
+ * (Performance Profiling Methodology, Table 3 in the paper).
+ *
+ * Usage:
+ *   sudo bpftrace sched_latency.bt > sched_latency_log.csv
+ *
+ * Output: histogram of scheduling latency (microseconds) per comm,
+ * printed every 5 seconds, plus running average.
+ *
+ * Run this under three conditions to get real comparative numbers:
+ *   1. Idle / low load baseline
+ *   2. Normal workload (your test containers under moderate load)
+ *   3. Contended workload (co-located containers under stress)
+ * Save each run's output separately (idle.csv, normal.csv, stress.csv)
+ */
+
+BEGIN
+{
+    printf("Tracing scheduling latency... Hit Ctrl-C to end.\n");
+}
+
+tracepoint:sched:sched_wakeup,
+tracepoint:sched:sched_wakeup_new
+{
+    @qtime[args->pid] = nsecs;
+}
+
+tracepoint:sched:sched_switch
+{
+    // args->prev_pid is leaving the CPU; args->next_pid is entering
+    $next_pid = args->next_pid;
+    $ts = @qtime[$next_pid];
+    if ($ts != 0) {
+        $delta_us = (nsecs - $ts) / 1000;
+        @sched_latency_us = hist($delta_us);
+        @avg_latency_us[args->next_comm] = avg($delta_us);
+        delete(@qtime[$next_pid]);
+    }
+}
+
+interval:s:5
+{
+    time("=== %s ===\n");
+    print(@sched_latency_us);
+    print(@avg_latency_us);
+}
+
+END
+{
+    clear(@qtime);
+    clear(@sched_latency_us);
+    clear(@avg_latency_us);
+}
